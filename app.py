@@ -1,17 +1,18 @@
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 import numpy as np
 import time
 import pandas as pd
 from io import BytesIO
 import os
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import torch
 from utils.model_loader import Detector
 
 # 获取项目根目录
 BASE_DIR = Path(__file__).parent
 
-# PDF 生成函数
 # PDF 生成函数（支持中文）
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -19,9 +20,8 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from io import BytesIO
 
-# 注册中文字体（以微软雅黑为例，请确保字体文件存在）
+# 注册中文字体
 try:
     pdfmetrics.registerFont(TTFont('MicrosoftYaHei', 'C:/Windows/Fonts/msyh.ttc'))
     FONT_NAME = 'MicrosoftYaHei'
@@ -30,43 +30,24 @@ except:
         pdfmetrics.registerFont(TTFont('SimSun', 'C:/Windows/Fonts/simsun.ttc'))
         FONT_NAME = 'SimSun'
     except:
-        FONT_NAME = 'Helvetica'  # 回退字体
+        FONT_NAME = 'Helvetica'
 
 def generate_pdf_report(records):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     elements = []
     
-    # 自定义中文字体样式
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Title'],
-        fontName=FONT_NAME,
-        fontSize=16,
-        alignment=1  # 居中
-    )
-    normal_style = ParagraphStyle(
-        'CustomNormal',
-        parent=styles['Normal'],
-        fontName=FONT_NAME,
-        fontSize=10
-    )
+    title_style = ParagraphStyle('CustomTitle', parent=styles['Title'], fontName=FONT_NAME, fontSize=16, alignment=1)
+    normal_style = ParagraphStyle('CustomNormal', parent=styles['Normal'], fontName=FONT_NAME, fontSize=10)
     
     title = Paragraph("工件缺陷检测报告", title_style)
     elements.append(title)
     elements.append(Spacer(1, 12))
     
-    # 准备表格数据
     data = [["文件名", "检测时间", "划痕数量", "漏装数量", "耗时(ms)"]]
     for r in records:
-        data.append([
-            r["文件名"], 
-            r["检测时间"], 
-            str(r["划痕数量"]),
-            str(r["漏装螺丝数量"]), 
-            str(r["检测耗时(ms)"])
-        ])
+        data.append([r["文件名"], r["检测时间"], str(r["划痕数量"]), str(r["漏装螺丝数量"]), str(r["检测耗时(ms)"])])
     
     table = Table(data)
     table.setStyle(TableStyle([
@@ -84,9 +65,204 @@ def generate_pdf_report(records):
     buffer.seek(0)
     return buffer
 
-# ------------------- 页面配置 -------------------
+# ==================== 图像预处理器（针对手机拍照优化）====================
+class SmartImagePreprocessor:
+    """智能图像预处理器 - 应对手机拍照的各种环境问题"""
+    
+    @staticmethod
+    def preprocess_for_mobile(image: Image.Image) -> Image.Image:
+        """
+        对手机拍摄的图片进行智能预处理：
+        1. 自动旋转（根据EXIF信息）
+        2. 光线校正（自动亮度/对比度）
+        3. 锐化增强（提升细节）
+        4. 噪声抑制（低光环境）
+        5. 尺寸标准化
+        """
+        # 1. 自动旋转（处理手机竖拍照片）
+        image = SmartImagePreprocessor._auto_rotate(image)
+        
+        # 2. 光线分析与校正
+        image = SmartImagePreprocessor._enhance_lighting(image)
+        
+        # 3. 质量增强
+        image = SmartImagePreprocessor._enhance_quality(image)
+        
+        # 4. 尺寸标准化（保持宽高比）
+        image = SmartImagePreprocessor._resize_smart(image, max_size=640)
+        
+        return image
+    
+    @staticmethod
+    def _auto_rotate(image: Image.Image) -> Image.Image:
+        """根据EXIF信息自动旋转图片"""
+        try:
+            if hasattr(image, '_getexif'):
+                exif = image._getexif()
+                if exif is not None:
+                    orientation = exif.get(274)  # Orientation tag
+                    rotation_map = {
+                        3: Image.ROTATE_180,
+                        6: Image.ROTATE_270,
+                        8: Image.ROTATE_90,
+                    }
+                    if orientation in rotation_map:
+                        image = image.transpose(rotation_map[orientation])
+        except:
+            pass
+        return image
+    
+    @staticmethod
+    def _enhance_lighting(image: Image.Image) -> Image.Image:
+        """智能光线校正 - 适应过暗/过亮/逆光等场景"""
+        img_array = np.array(image)
+        
+        # 计算当前亮度
+        brightness = np.mean(img_array)
+        
+        # 动态调整参数
+        if brightness < 100:  # 过暗（夜景/室内弱光）
+            enhancer = ImageEnhance.Brightness(image)
+            image = enhancer.enhance(1.5)  # 提亮50%
+            
+            enhancer = ImageEnhance.Contrast(image)
+            image = enhancer.enhance(1.2)  # 增强对比度
+            
+            # 轻微降噪
+            image = image.filter(ImageFilter.MedianFilter(size=3))
+            
+        elif brightness > 180:  # 过亮（强光/逆光）
+            enhancer = ImageEnhance.Brightness(image)
+            image = enhancer.enhance(0.85)  # 降低亮度
+            
+            enhancer = ImageEnhance.Contrast(image)
+            image = enhancer.enhance(1.15)
+            
+        else:  # 正常光线 - 轻微优化
+            enhancer = ImageEnhance.Contrast(image)
+            image = enhancer.enhance(1.08)
+            
+            enhancer = ImageEnhance.Sharpness(image)
+            image = enhancer.enhance(1.1)
+        
+        return image
+    
+    @staticmethod
+    def _enhance_quality(image: Image.Image) -> Image.Image:
+        """通用质量增强"""
+        # 锐化（提升边缘清晰度）
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(1.15)
+        
+        # 色彩饱和度微调（让颜色更鲜明）
+        enhancer = ImageEnhance.Color(image)
+        image = enhancer.enhance(1.05)
+        
+        return image
+    
+    @staticmethod
+    def _resize_smart(image: Image.Image, max_size: int = 640) -> Image.Image:
+        """智能缩放 - 保持宽高比，避免变形"""
+        width, height = image.size
+        
+        if max(width, height) <= max_size:
+            return image
+        
+        ratio = max_size / max(width, height)
+        new_size = (int(width * ratio), int(height * ratio))
+        
+        # 使用高质量重采样
+        image = image.resize(new_size, Image.LANCZOS)
+        
+        return image
+
+
+# ==================== 批量处理器（支持30+张稳定运行）====================
+class BatchProcessor:
+    """高效批量处理器 - 内存管理 + 错误恢复 + 进度追踪"""
+    
+    def __init__(self, detector, max_batch_size=30, enable_preprocess=False):
+        self.detector = detector
+        self.max_batch_size = max_batch_size
+        self.enable_preprocess = enable_preprocess
+        self.preprocessor = SmartImagePreprocessor()
+        
+    def process_batch(self, files_list, progress_callback=None):
+        """
+        批量处理图片列表
+        - 自动内存管理
+        - 错误隔离（单张失败不影响其他）
+        - 进度回调
+        """
+        results = []
+        errors = []
+        total = len(files_list)
+        
+        for idx, uploaded_file in enumerate(files_list[:self.max_batch_size]):
+            file_key = uploaded_file.name
+            current_progress = ((idx + 1) / total) * 100
+            
+            try:
+                # 更新进度
+                if progress_callback:
+                    progress_callback(idx + 1, total, f"正在检测: {file_key}")
+                
+                # 读取图片
+                image = Image.open(uploaded_file).convert("RGB")
+
+                # 根据设置决定是否进行智能预处理
+                if self.enable_preprocess:
+                    image = self.preprocessor.preprocess_for_mobile(image)
+                else:
+                    # 仅做基本的尺寸缩放（不超过640）
+                    max_size = 640
+                    if max(image.width, image.height) > max_size:
+                        ratio = max_size / max(image.width, image.height)
+                        new_size = (int(image.width * ratio), int(image.height * ratio))
+                        image = image.resize(new_size, Image.LANCZOS)
+
+                # 执行检测 - 直接传PIL对象，不转numpy（避免转换问题）
+                start_time = time.time()
+                combined_img, info = self.detector.detect_both(image)
+                inference_time = time.time() - start_time
+                
+                # 记录结果
+                result = {
+                    'file_key': file_key,
+                    'image': image.copy(),  # 处理后的图片
+                    'combined_img': combined_img,
+                    'info': info,
+                    'inference_time': inference_time,
+                    'record': {
+                        "文件名": file_key,
+                        "检测时间": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "划痕数量": info['scratch_count'],
+                        "漏装螺丝数量": info['missing_count'],
+                        "检测耗时(ms)": round(inference_time * 1000, 1)
+                    }
+                }
+                results.append(result)
+
+                # 及时释放内存
+                del image, combined_img
+                
+            except Exception as e:
+                error_info = {
+                    'file_key': file_key,
+                    'error': str(e),
+                    'index': idx + 1
+                }
+                errors.append(error_info)
+                
+                # 继续处理下一张
+                continue
+        
+        return results, errors
+
+
+# ==================== 页面配置 ====================
 st.set_page_config(
-    page_title="智能工件质检系统",
+    page_title="智能质检系统 - MES团队",
     page_icon="🔧",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -97,83 +273,434 @@ if "detection_records" not in st.session_state:
     st.session_state.detection_records = []
 if "detection_cache" not in st.session_state:
     st.session_state.detection_cache = {}
+if "all_uploaded_files_persistent" not in st.session_state:
+    st.session_state.all_uploaded_files_persistent = []
+if "deleted_files" not in st.session_state:
+    st.session_state.deleted_files = set()
+# 新增：用于标记是否刚执行了清除操作，防止rerun时重复添加
+if "just_cleared" not in st.session_state:
+    st.session_state.just_cleared = False
+# 新增：上传器版本号（用于强制重置文件列表）
+if "uploader_key_version" not in st.session_state:
+    st.session_state.uploader_key_version = 0
 
-# ------------------- 自定义CSS -------------------
-st.markdown("""
-<style>
-    .stApp {
-        background: linear-gradient(135deg, #f0f4fc 0%, #d9e2ef 100%);
-        background-attachment: fixed;
-    }
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-    .css-1d391kg, .css-1lcbmhc {
-        background: rgba(255,255,255,0.9);
-        backdrop-filter: blur(10px);
-        border-right: 1px solid rgba(0,0,0,0.05);
-    }
-    .card {
-        background: white;
-        border-radius: 20px;
-        padding: 1.5rem;
-        box-shadow: 0 10px 25px -5px rgba(0,0,0,0.05), 0 8px 10px -6px rgba(0,0,0,0.02);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-        margin-bottom: 1rem;
-        border: 1px solid rgba(255,255,255,0.3);
-    }
-    .card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 20px 25px -12px rgba(0,0,0,0.1);
-    }
-    .metric-card {
-        background: white;
-        border-radius: 24px;
-        padding: 1rem 1.5rem;
-        text-align: center;
-        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
-        border: 1px solid #e5e7eb;
-    }
-    .metric-value {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1e3c72;
-        line-height: 1.2;
-    }
-    .metric-label {
-        font-size: 0.85rem;
-        color: #6b7280;
-        letter-spacing: 0.5px;
-    }
+# ==================== 移动端优化的CSS ====================
+mobile_optimized_css = """
+.stApp {
+    background: linear-gradient(135deg, #f0f4fc 0%, #d9e2ef 100%);
+    background-attachment: fixed;
+}
+
+/* 移动端触摸优化 */
+@media (max-width: 768px) {
     .stButton button {
-        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-        color: white;
-        border: none;
-        border-radius: 40px;
-        padding: 0.5rem 2rem;
-        font-weight: 500;
-        transition: all 0.2s;
+        min-height: 48px !important;  /* Apple推荐的最小触控区域 */
+        font-size: 16px !important;   /* 防止iOS自动缩放 */
     }
-    .stButton button:hover {
-        transform: scale(1.02);
-        box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+    
+    [data-testid="stFileUploadWrapper"] {
+        padding: 1.5rem !important;
     }
-    footer {
-        visibility: hidden;
+    
+    /* 结果卡片移动端优化 */
+    .card {
+        margin-bottom: 1.5rem !important;
+        padding: 1rem !important;
     }
-</style>
+    
+    /* 统计面板移动端 */
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 0.8rem !important;
+    }
+    
+    .stat-item {
+        padding: 0.8rem !important;
+    }
+    
+    .stat-value {
+        font-size: 1.5rem !important;
+    }
+}
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
+.css-1d391kg, .css-1lcbmhc {
+    background: rgba(255,255,255,0.9);
+    backdrop-filter: blur(10px);
+    border-right: 1px solid rgba(0,0,0,0.05);
+}
+.card {
+    background: white;
+    border-radius: 20px;
+    padding: 1.5rem;
+    box-shadow: 0 10px 25px -5px rgba(0,0,0,0.05), 0 8px 10px -6px rgba(0,0,0,0.02);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    margin-bottom: 1rem;
+    border: 1px solid rgba(255,255,255,0.3);
+}
+.card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 20px 25px -12px rgba(0,0,0,0.1);
+}
+.metric-card {
+    background: white;
+    border-radius: 24px;
+    padding: 1rem 1.5rem;
+    text-align: center;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
+    border: 1px solid #e5e7eb;
+}
+.metric-value {
+    font-size: 2.2rem;
+    font-weight: 700;
+    color: #1e3c72;
+    line-height: 1.2;
+}
+.metric-label {
+    font-size: 0.85rem;
+    color: #6b7280;
+    letter-spacing: 0.5px;
+}
+.stButton button {
+    background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+    color: white;
+    border: none;
+    border-radius: 40px;
+    padding: 0.5rem 2rem;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+.stButton button:hover {
+    transform: scale(1.02);
+    box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+}
+
+/* Scroll to Top Button */
+.scroll-top-btn {
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    width: 50px;
+    height: 50px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    font-size: 1.5rem;
+    cursor: pointer;
+    z-index: 9998;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    transition: all 0.3s ease;
+    display: none;
+    align-items: center;
+    justify-content: center;
+}
+.scroll-top-btn:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(102, 126, 234, 0.6);
+}
+.scroll-top-btn.show {
+    display: flex;
+}
+
+/* Statistics Panel */
+.stats-panel {
+    background: linear-gradient(135deg, rgba(30, 60, 114, 0.05), rgba(42, 82, 152, 0.05));
+    border: 2px solid rgba(30, 60, 114, 0.1);
+    border-radius: 20px;
+    padding: 1.5rem;
+    margin: 1.5rem 0;
+}
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1rem;
+    margin-top: 1rem;
+}
+.stat-item {
+    text-align: center;
+    padding: 1rem;
+    background: white;
+    border-radius: 15px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+}
+.stat-value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #1e3c72;
+}
+.stat-label {
+    font-size: 0.85rem;
+    color: #6b7280;
+    margin-top: 0.3rem;
+}
+
+/* 进度条样式 */
+.batch-progress-container {
+    padding: 1.5rem;
+    background: linear-gradient(135deg, #667eea10, #764ba210);
+    border-radius: 15px;
+    border: 1px solid #667eea30;
+    margin: 1rem 0;
+}
+"""
+
+st.markdown(f"<style>{mobile_optimized_css}</style>", unsafe_allow_html=True)
+
+# ==================== JavaScript ====================
+force_hide_js_v2 = """
+<script>
+function initDeleteSystem() {
+    console.log('[DELETE-SYS] Initializing...');
+    bindDeleteButtons();
+    
+    var observer = new MutationObserver(function() {
+        bindDeleteButtons();
+    });
+    observer.observe(document.body, {childList: true, subtree: true, attributes: false});
+    
+    setInterval(bindDeleteButtons, 300);
+    setTimeout(bindDeleteButtons, 500);
+    setTimeout(bindDeleteButtons, 1000);
+    setTimeout(bindDeleteButtons, 2000);
+}
+
+function bindDeleteButtons() {
+    var allBtns = document.querySelectorAll('button');
+    
+    allBtns.forEach(function(btn) {
+        if (btn.dataset.deleteBound) return;
+        
+        var parent = btn.closest('div') || btn.parentElement;
+        var grandParent = parent ? parent.parentElement : null;
+        var text = (parent.textContent || '') + (grandParent ? grandParent.textContent : '');
+        
+        var isRemoveBtn = (
+            text.indexOf('KB') !== -1 ||
+            text.indexOf('MB') !== -1 ||
+            text.indexOf('.jpg') !== -1 ||
+            text.indexOf('.png') !== -1 ||
+            (btn.getAttribute('aria-label') && btn.getAttribute('aria-label').indexOf('Remove') !== -1) ||
+            (btn.getAttribute('aria-label') && btn.getAttribute('aria-label').indexOf('remove') !== -1) ||
+            btn.innerHTML.indexOf('\\u00d7') !== -1 ||
+            btn.innerHTML.indexOf('&times;') !== -1
+        );
+        
+        var isNearFileUpload = (
+            (btn.closest('[data-testid="stFileUploadWrapper"]') !== null) ||
+            (btn.closest('[data-testid="stUploadedFile"]') !== null)
+        );
+        
+        if (!isRemoveBtn && !isNearFileUpload) return;
+        
+        btn.dataset.deleteBound = 'true';
+        
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            
+            console.log('[DELETE] X button clicked!');
+            
+            var fileName = extractFileName(btn);
+            
+            if (!fileName) {
+                console.warn('[DELETE] Could not extract filename');
+                alert('Could not identify file to delete');
+                return;
+            }
+            
+            console.log('[DELETE] Target:', fileName);
+            
+            sessionStorage.setItem('deleteScrollPos', window.pageYOffset || document.documentElement.scrollTop);
+            sessionStorage.setItem('lastDeletedFile', fileName);
+            
+            performCompleteDeletion(fileName);
+        });
+    });
+}
+
+function extractFileName(btn) {
+    var container = btn.closest('[data-testid="stUploadedFile"]') ||
+                   btn.closest('div[class*="uploaded"]') ||
+                   (btn.parentElement ? btn.parentElement.parentElement : null);
+    
+    if (container) {
+        var text = container.textContent || '';
+        var match = text.match(/([\\w\\-]+\\.(jpg|jpeg|png))/i);
+        if (match) return match[1];
+    }
+    
+    var siblings = [];
+    var parent = btn.parentElement;
+    if (parent) {
+        for (var i = 0; i < parent.children.length; i++) {
+            siblings.push(parent.children[i].textContent);
+        }
+    }
+    var combinedText = siblings.join(' ');
+    var match = combinedText.match(/([\\w\\-]+\\.(jpg|jpeg|png))/i);
+    if (match) return match[1];
+    
+    var grandparent = btn.parentElement ? btn.parentElement.parentElement : null;
+    if (grandparent) {
+        var text = grandparent.textContent || '';
+        var lines = text.split('\\n').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+        for (var idx = 0; idx < lines.length; idx++) {
+            var line = lines[idx];
+            if (line.match(/\\.(jpg|jpeg|png)/i) && line.indexOf('KB') === -1) {
+                return line.trim();
+            }
+        }
+    }
+    
+    return '';
+}
+
+function performCompleteDeletion(fileName) {
+    console.log('[DELETE] Starting complete deletion for:', fileName);
+    
+    var deletedCount = 0;
+    
+    document.querySelectorAll('div, section').forEach(function(el) {
+        var text = el.textContent || '';
+        if ((text.indexOf(fileName) !== -1) &&
+            (text.indexOf('KB') !== -1 || text.indexOf('MB') !== -1 || el.querySelector('button'))) {
+            
+            if (!el.querySelector('img') && el.children.length <= 5) {
+                try {
+                    el.style.display = 'none';
+                    el.remove();
+                    deletedCount++;
+                    console.log('[DELETE] Removed file list item');
+                } catch(err) {}
+            }
+        }
+    });
+    
+    document.querySelectorAll('div[class*="card"], div[data-testid], section').forEach(function(el) {
+        var text = el.textContent || '';
+        if (text.indexOf(fileName) !== -1 && el.querySelector('img')) {
+            try {
+                el.style.display = 'none';
+                setTimeout(function() {
+                    try { el.remove(); } catch(e) {}
+                }, 100);
+                deletedCount++;
+                console.log('[DELETE] Removed result card');
+            } catch(err) {}
+        }
+    });
+    
+    console.log('[DELETE] Complete! Removed ' + deletedCount + ' elements');
+    
+    showDeleteFeedback(fileName);
+}
+
+function showDeleteFeedback(fileName) {
+    var feedback = document.createElement('div');
+    feedback.style.position = 'fixed';
+    feedback.style.top = '20px';
+    feedback.style.right = '20px';
+    feedback.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+    feedback.style.color = 'white';
+    feedback.style.padding = '15px 25px';
+    feedback.style.borderRadius = '10px';
+    feedback.style.boxShadow = '0 5px 20px rgba(0,0,0,0.3)';
+    feedback.style.zIndex = '99999';
+    feedback.style.fontWeight = 'bold';
+    feedback.innerHTML = 'Deleted: ' + fileName;
+    
+    document.body.appendChild(feedback);
+    
+    setTimeout(function() {
+        try { feedback.remove(); } catch(e) {}
+    }, 2000);
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initDeleteSystem);
+} else {
+    initDeleteSystem();
+}
+
+setTimeout(initDeleteSystem, 500);
+setTimeout(initDeleteSystem, 1500);
+
+console.log('[OK] Delete System v3 initialized');
+
+// ========== Scroll Position Keeper ==========
+(function() {
+    var lastPos = 0;
+    
+    window.addEventListener('scroll', function() {
+        lastPos = window.pageYOffset || document.documentElement.scrollTop;
+        sessionStorage.setItem('scrollPos', lastPos);
+    }, {passive: true});
+    
+    window.addEventListener('load', function() {
+        var saved = sessionStorage.getItem('scrollPos') || sessionStorage.getItem('deleteScrollPos');
+        if (saved && parseInt(saved) > 100) {
+            setTimeout(function() { window.scrollTo(0, parseInt(saved)); }, 100);
+        }
+    });
+})();
+
+// ========== Folder Upload Support ==========
+document.addEventListener('DOMContentLoaded', function() {
+    setTimeout(function() {
+        var inputs = document.querySelectorAll('[data-testid="stFileUploadWrapper"] input[type="file"]');
+        inputs.forEach(function(input) {
+            input.setAttribute('webkitdirectory', '');
+            input.setAttribute('directory', '');
+            if (window.innerWidth <= 768) input.setAttribute('multiple', 'true');
+        });
+    }, 1000);
+});
+</script>
+"""
+st.components.v1.html(force_hide_js_v2, height=0)
+
+# ==================== 返回顶部按钮 ====================
+st.markdown("""
+<button class="scroll-top-btn" onclick="window.scrollTo({top: 0, behavior: 'smooth'});">↑</button>
+
+<script>
+(function() {
+    var scrollBtn = document.querySelector('.scroll-top-btn');
+    if (scrollBtn) {
+        window.addEventListener('scroll', function() {
+            if (window.pageYOffset > 300) {
+                scrollBtn.classList.add('show');
+            } else {
+                scrollBtn.classList.remove('show');
+            }
+        });
+    }
+})();
+</script>
 """, unsafe_allow_html=True)
 
-# ------------------- 侧边栏 -------------------
+# 初始化变量
+uploaded_files = None
+
+# ==================== 侧边栏 ====================
 with st.sidebar:
     st.markdown("### ⚙️ 检测参数")
-    scratch_conf = st.slider("📈 划痕置信度", 0.0, 1.0, 0.6, 0.01)
-    missing_conf = st.slider("📉 漏装置信度", 0.0, 1.0, 0.8, 0.01)
-    st.info("提示：划痕阈值 0.5 - 0.7，漏装阈值 0.6 - 0.9")
+    scratch_conf = st.slider("📈 划痕置信度", 0.0, 1.0, 0.5, 0.01)
+    missing_conf = st.slider("📉 漏装置信度", 0.0, 1.0, 0.5, 0.01)
+    st.info("💡 提示：建议阈值范围 0.3-0.7。太低会误检，太高会漏检")
     st.markdown("---")
     
-    # 显示当前记录数（调试用，可删除）
+    st.markdown("### ⚡ 高级选项")
+    enable_preprocess = st.checkbox("启用智能图像增强", value=False,
+                                    help="针对手机拍照优化（光线校正/锐化等）。关闭可提高检测稳定性")
+    st.info("🔧 如果检测不到缺陷，请尝试打开此选项")
+    st.markdown("---")
+    
     st.write(f"📊 当前检测记录数：{len(st.session_state.detection_records)}")
     
     col1, col2 = st.columns(2)
@@ -205,25 +732,24 @@ with st.sidebar:
                     mime="application/pdf"
                 )
 
-# ------------------- 标题行 -------------------
+# ==================== 标题行 ====================
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
     st.markdown(
         """
         <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
             <span style="font-size: 3.5rem;">🔧</span>
-            <span style="font-size: 3rem; font-weight: 800; background: linear-gradient(135deg, #1E3A6F, #2E5A9F); -webkit-background-clip: text; background-clip: text; color: transparent;">智能工件质检系统</span>
+            <span style="font-size: 3rem; font-weight: 800; background: linear-gradient(135deg, #1E3A6F, #2E5A9F); -webkit-background-clip: text; background-clip: text; color: transparent;">轻量化智能质检系统</span>
         </div>
-        <p style="text-align: center; font-size: 1rem; color: #4a627a; margin-top: 0;">基于 YOLOv26 | 划痕识别 · 漏装螺丝检测</p>
+        <p style="text-align: center; font-size: 1rem; color: #4a627a; margin-top: 0;">基于 YOLOv26 的缺陷检测系统 —— MES团队</p>
         """,
         unsafe_allow_html=True
     )
 
-# ------------------- 加载模型 -------------------
+# ==================== 加载模型 ====================
 @st.cache_resource
 def load_models():
     try:
-        # 使用相对路径加载模型
         scratch_path = BASE_DIR / "models" / "scratch_best.pt"
         missing_path = BASE_DIR / "models" / "missing_screw_best.pt"
         
@@ -242,82 +768,428 @@ detector = load_models()
 detector.set_scratch_conf(scratch_conf)
 detector.set_missing_conf(missing_conf)
 
-# ------------------- 上传区域 -------------------
-uploaded_files = st.file_uploader(
-    "📸 点击或拖拽图片至此区域",
-    type=["jpg", "jpeg", "png"],
-    accept_multiple_files=True,
-    label_visibility="collapsed"
-)
+# 初始化批量处理器
+batch_processor = BatchProcessor(detector, max_batch_size=50, enable_preprocess=enable_preprocess)
 
-# ------------------- 检测与展示 -------------------
+# ==================== 设备检测与自适应上传区域 ====================
+st.markdown("""
+<script>
+// 检测设备类型并存储到sessionStorage
+(function() {
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) 
+                   || window.innerWidth <= 768;
+    sessionStorage.setItem('isMobileDevice', isMobile);
+    sessionStorage.setItem('deviceType', isMobile ? 'mobile' : 'desktop');
+    
+    // 文件夹上传支持（仅桌面端）
+    if (!isMobile) {
+        setTimeout(function() {
+            var inputs = document.querySelectorAll('input[type="file"][data-testid*="folder"]');
+            inputs.forEach(function(input) {
+                input.setAttribute('webkitdirectory', '');
+                input.setAttribute('directory', '');
+            });
+        }, 1000);
+    }
+})();
+</script>
+""", unsafe_allow_html=True)
+
+# 读取设备类型
+device_type = "desktop"  # 默认桌面端
+
+# ==================== 上传区域（设备自适应）====================
+
+# 上传选项卡样式
+upload_tab_css = """
+<style>
+.upload-container {
+    display: flex;
+    gap: 1rem;  /* 紧凑间距 */
+    margin: 1.5rem 0;
+}
+.upload-option-card {
+    background: white;
+    border-radius: 20px;
+    padding: 1.5rem;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    border: 3px solid transparent;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+    flex: 1;
+}
+.upload-option-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+    border-color: #667eea;
+}
+.upload-icon-large {
+    font-size: 3rem;
+    margin-bottom: 0.6rem;
+}
+.upload-title {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #1e3c72;
+    margin-bottom: 0.4rem;
+}
+.upload-desc {
+    font-size: 0.85rem;
+    color: #6b7280;
+    line-height: 1.4;
+}
+
+/* 隐藏文件列表 */
+[data-testid="stFileUploadWrapper"] [data-testid="stUploadedFile"] {
+    display: none !important;
+}
+
+/* 一键删除按钮样式 */
+.clear-all-btn {
+    background: linear-gradient(135deg, #ff416c, #ff4b2b) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 25px !important;
+    padding: 0.7rem 2rem !important;
+    font-weight: 600 !important;
+    box-shadow: 0 4px 15px rgba(255,65,108,0.3) !important;
+    transition: all 0.2s !important;
+}
+.clear-all-btn:hover {
+    transform: scale(1.05) !important;
+    box-shadow: 0 6px 20px rgba(255,65,108,0.4) !important;
+}
+</style>
+"""
+st.markdown(upload_tab_css, unsafe_allow_html=True)
+
+# ==================== 上传区域（紧凑双卡片）====================
+st.markdown("### 📤 上传图片进行检测")
+
+# 使用更紧凑的列布局（gap="small"）
+col_upload1, col_upload2 = st.columns(2, gap="small")
+
+with col_upload1:
+    st.markdown("""
+    <div class="upload-option-card" onclick="document.getElementById('single-file-input').click()">
+        <div class="upload-icon-large">📸</div>
+        <div class="upload-title">选择图片文件</div>
+        <div class="upload-desc">
+            从电脑/手机选择图片<br>
+            <span style="color: #667eea; font-weight: 600;">📱 手机端最多选20张</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    uploaded_files_single = st.file_uploader(
+        "",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        key=f"file_uploader_single_v{st.session_state.uploader_key_version}",
+        label_visibility="collapsed"
+    )
+
+with col_upload2:
+    st.markdown("""
+    <div class="upload-option-card" onclick="document.getElementById('folder-input').click()">
+        <div class="upload-icon-large">📁</div>
+        <div class="upload-title">选择整个文件夹</div>
+        <div class="upload-desc">
+            自动上传文件夹内所有图片<br>
+            <span style="color: #10b981; font-weight: 600;">✨ 无数量限制（推荐）</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 文件夹上传组件
+    uploaded_files_folder = st.file_uploader(
+        "",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        key=f"file_uploader_folder_v{st.session_state.uploader_key_version}",
+        label_visibility="collapsed"
+    )
+
+# 注入文件夹选择的JavaScript和隐藏input（通过components.html避免显示）
+st.components.v1.html("""
+<input type="file" 
+       id="folder-input" 
+       webkitdirectory 
+       directory 
+       multiple 
+       accept="image/jpeg,image/jpg,image/png"
+       style="display: none;"
+       onchange="handleFolderSelect(event)">
+
+<script>
+function handleFolderSelect(event) {
+    const files = event.target.files;
+    if (files.length === 0) return;
+    
+    alert('已选择 ' + files.length + ' 张图片，正在上传...');
+    
+    // 创建新的DataTransfer对象
+    const dataTransfer = new DataTransfer();
+    for (let file of files) {
+        dataTransfer.items.add(file);
+    }
+    
+    // 找到Streamlit的文件上传器并设置文件
+    const streamlitInput = document.querySelector('input[data-testid="stFileUploadInput"]');
+    if (streamlitInput) {
+        streamlitInput.files = dataTransfer.files;
+        const changeEvent = new Event('change', { bubbles: true });
+        streamlitInput.dispatchEvent(changeEvent);
+    }
+}
+</script>
+""", height=0)
+
+# 合并两种上传方式的结果
+uploaded_files = None
+if uploaded_files_single:
+    uploaded_files = uploaded_files_single
+elif uploaded_files_folder:
+    uploaded_files = uploaded_files_folder
+
+# 调试输出：显示上传的文件数量
 if uploaded_files:
-    for uploaded_file in uploaded_files:
-        file_key = uploaded_file.name
+    print(f"📂 上传了 {len(uploaded_files)} 个文件:")
+    for f in uploaded_files[:5]:  # 只显示前5个
+        print(f"   - {f.name}")
+    if len(uploaded_files) > 5:
+        print(f"   ... 还有 {len(uploaded_files)-5} 个文件")
+
+# ==================== 批量检测与展示 ====================
+
+# 合并底部上传的新文件
+all_uploaded_files = list(uploaded_files) if uploaded_files else []
+if "bottom_new_files" in st.session_state and st.session_state.bottom_new_files:
+    for f in st.session_state.bottom_new_files:
+        if f.name not in [x.name for x in all_uploaded_files]:
+            all_uploaded_files.append(f)
+    del st.session_state.bottom_new_files
+
+print(f"\n📊 待处理文件总数: {len(all_uploaded_files)}")
+print(f"   just_cleared 标志: {st.session_state.get('just_cleared', False)}")
+print(f"   uploader_key_version: {st.session_state.get('uploader_key_version', 0)}")
+
+if all_uploaded_files:
+    # 初始化 results 和 errors 变量
+    results = []
+    errors = []
+
+    # 如果刚执行过清除操作，跳过本次检测（防止rerun时重复添加）
+    # 但要确保：如果用户上传了新文件，即使刚清除过也要检测
+    if st.session_state.get("just_cleared", False):
+        # 检查是否真的刚清除（没有新文件上传）
+        # 如果有文件，说明是新上传的，应该正常处理
+        print("⚠️ 检测到 just_cleared 标志，但仍有待处理文件")
+        print("   → 正常执行检测（这是用户新上传的文件）")
+        st.session_state.just_cleared = False  # 重置标志
+
+    # 执行批量检测（紧凑模式）
+    print(f"\n🚀 开始批量检测: 共 {len(all_uploaded_files)} 张图片")
+    results, errors = batch_processor.process_batch(
+        all_uploaded_files,
+        progress_callback=None  # 暂时禁用进度条以减少空白
+    )
+    print(f"✅ 检测完成: 成功 {len(results)} 张, 失败 {len(errors)} 张")
+
+    # 将结果存入缓存
+    for result in results:
+        file_key = result['file_key']
         if file_key not in st.session_state.detection_cache:
-            # 执行检测
-            image = Image.open(uploaded_file).convert("RGB")
-            # 压缩图片到最大640像素
-            max_size = 640
-            if max(image.width, image.height) > max_size:
-                ratio = max_size / max(image.width, image.height)
-                new_size = (int(image.width * ratio), int(image.height * ratio))
-                image = image.resize(new_size, Image.LANCZOS)
-            img_np = np.array(image)
-            start_time = time.time()
-            with st.spinner(f"检测中 ({file_key})..."):
-                combined_img, info = detector.detect_both(img_np)
-            inference_time = time.time() - start_time
-            # 缓存结果
-            st.session_state.detection_cache[file_key] = (combined_img, info, inference_time, image)
-            # 添加记录
-            record = {
-                "文件名": uploaded_file.name,
-                "检测时间": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "划痕数量": info['scratch_count'],
-                "漏装螺丝数量": info['missing_count'],
-                "检测耗时(ms)": round(inference_time * 1000, 1)
-            }
-            st.session_state.detection_records.append(record)
-        else:
-            combined_img, info, inference_time, image = st.session_state.detection_cache[file_key]
+            st.session_state.detection_cache[file_key] = (
+                result['combined_img'],
+                result['info'],
+                result['inference_time'],
+                result['image']
+            )
+            st.session_state.detection_records.append(result['record'])
+            print(f"   ✓ 已添加: {file_key}")
+
+    # 显示错误信息
+    if errors:
+        with st.expander(f"⚠️ {len(errors)} 张图片检测失败（点击查看详情）"):
+            for err in errors:
+                st.error(f"❌ 第{err['index']}张 [{err['file_key']}]: {err['error']}")
+                print(f"   ✗ 失败: {err['file_key']} - {err['error']}")
+    
+    # 实时统计面板（仅当有检测记录时显示）
+    if st.session_state.detection_records:
+        # 使用 detection_records 的长度作为总图片数（更准确）
+        total_images = len(st.session_state.detection_records)
+        total_scratches = sum(r['划痕数量'] for r in st.session_state.detection_records)
+        total_missing = sum(r['漏装螺丝数量'] for r in st.session_state.detection_records)
+        avg_time_val = sum(r['检测耗时(ms)'] for r in st.session_state.detection_records) / len(st.session_state.detection_records) if st.session_state.detection_records else 0
+
+        success_rate = 100.0  # 能到这里说明都成功了
+        avg_time_rounded = round(avg_time_val, 1)
         
-        # 显示结果卡片
-        with st.container():
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            col_img1, col_img2 = st.columns(2, gap="medium")
-            with col_img1:
-                st.markdown("**原始工件**")
-                st.image(image, use_container_width=True, output_format="PNG")
-            with col_img2:
-                st.markdown("**检测结果**")
-                st.image(combined_img, use_container_width=True, output_format="PNG", clamp=True, channels="RGB")
-            
-            # 统计指标
-            col_met1, col_met2 = st.columns(2)
-            with col_met1:
-                st.markdown(f'<div class="metric-card"><div class="metric-value">{info["scratch_count"]}</div><div class="metric-label">划痕数量</div></div>', unsafe_allow_html=True)
-            with col_met2:
-                st.markdown(f'<div class="metric-card"><div class="metric-value">{info["missing_count"]}</div><div class="metric-label">漏装螺丝</div></div>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown("---")
+        # 构建统计面板HTML（使用f-string确保变量替换）
+        stats_html = f"""
+        <div class="stats-panel">
+            <div style="font-size: 1.2rem; font-weight: 700; color: #1e3c72; margin-bottom: 0.8rem;">📊 检测统计</div>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-value">{total_images}</div>
+                    <div class="stat-label">已检图片</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">{success_rate:.0f}%</div>
+                    <div class="stat-label">成功率</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">{total_scratches}</div>
+                    <div class="stat-label">总划痕数</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">{total_missing}</div>
+                    <div class="stat-label">总漏装数</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">{avg_time_rounded}ms</div>
+                    <div class="stat-label">平均耗时</div>
+                </div>
+            </div>
+        </div>
+        """
+        
+        st.markdown(stats_html, unsafe_allow_html=True)
+
+        # 一键清除按钮（改进版 - 直接清除，无需二次确认）
+        col_clear1, col_clear2, col_clear3 = st.columns([1, 2, 1])
+        with col_clear2:
+            if st.button(f"🗑️ 一键清除全部结果 ({total_images}张)", key="clear_all_btn", use_container_width=True,
+                        help="点击后将立即清除所有检测结果和上传的文件"):
+                # 直接清除所有检测数据
+                st.session_state.detection_records = []
+                st.session_state.detection_cache = {}
+                st.session_state.deleted_files = set()
+                st.session_state.just_cleared = True  # 标记：刚执行了清除
+
+                # 🔑 关键：增加版本号，强制重新创建 file_uploader 组件
+                # 这样 Streamlit 会认为这是新组件，从而清除文件列表
+                st.session_state.uploader_key_version += 1
+
+                if "bottom_new_files" in st.session_state:
+                    del st.session_state.bottom_new_files
+                if "pending_uploads" in st.session_state:
+                    del st.session_state.pending_uploads
+                if "all_uploaded_files_persistent" in st.session_state:
+                    st.session_state.all_uploaded_files_persistent = []
+
+                st.success("✅ 已清除所有检测结果和上传文件")
+                st.rerun()
+
+        st.markdown("---")
+
+    # 显示检测结果卡片（从缓存中读取）
+    if st.session_state.detection_cache:
+        for file_key, cached_data in st.session_state.detection_cache.items():
+            combined_img, info, inference_time, image = cached_data
+
+            with st.container():
+                st.markdown('<div class="card">', unsafe_allow_html=True)
+
+                col_header = st.columns([5, 1])
+                with col_header[0]:
+                    st.markdown(f"**📁 {file_key}**")
+                with col_header[1]:
+                    st.caption(f"⏱️ {inference_time*1000:.1f}ms")
+
+                col_img1, col_img2 = st.columns(2, gap="medium")
+                with col_img1:
+                    st.markdown("**原始工件**")
+                    st.image(image, use_container_width=True, output_format="PNG")
+                with col_img2:
+                    st.markdown("**检测结果**")
+                    st.image(combined_img, use_container_width=True, output_format="PNG", clamp=True, channels="RGB")
+
+                col_met1, col_met2 = st.columns(2)
+                with col_met1:
+                    st.markdown(f'<div class="metric-card"><div class="metric-value">{info["scratch_count"]}</div><div class="metric-label">划痕数量</div></div>', unsafe_allow_html=True)
+                with col_met2:
+                    st.markdown(f'<div class="metric-card"><div class="metric-value">{info["missing_count"]}</div><div class="metric-label">漏装螺丝</div></div>', unsafe_allow_html=True)
+
+                st.markdown('</div>', unsafe_allow_html=True)
+                st.markdown("---")
+
 else:
     st.markdown(
         """
         <div style="display: flex; justify-content: center; align-items: center; flex-direction: column; padding: 3rem; background: #f9fafb; border-radius: 28px; margin-top: 1rem;">
             <img src="https://img.icons8.com/ios/100/2a5298/camera--v1.png" width="60">
-            <p style="color: #6b7280; margin-top: 1rem;">等待上传图片……</p>
-            <p style="color: #9ca3af; font-size: 0.8rem;">支持 JPG, PNG 格式，可同时上传多张</p>
+            <p style="color: #6b7280; margin-top: 1rem; font-weight: 600; font-size: 1.1rem;">等待上传图片……</p>
+            <p style="color: #9ca3af; font-size: 0.85rem; margin-top: 0.5rem;">支持 JPG, PNG 格式 | 可上传多张或整个文件夹</p>
+            <p style="color: #9ca3af; font-size: 0.8rem; margin-top: 0.3rem;">💡 点击原生文件列表的 × 可同时删除检测结果</p>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-# ------------------- 页脚 -------------------
+# ==================== 底部上传按钮（检测结果之后）====================
+if st.session_state.detection_records:
+    st.markdown("---")
+    
+    st.markdown("""
+    <style>
+    .bottom-upload-container {
+        text-align: center;
+        padding: 2rem 1rem;
+        margin-top: 1rem;
+    }
+    .bottom-upload-container [data-testid="stFileUploadWrapper"] {
+        display: inline-block !important;
+    }
+    .bottom-upload-container [data-testid="stFileUploadWrapper"] > div {
+        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%) !important;
+        border: none !important;
+        border-radius: 40px !important;
+        padding: 0.75rem 2.5rem !important;
+        box-shadow: 0 4px 15px rgba(30,60,114,0.3) !important;
+        cursor: pointer !important;
+        transition: all 0.2s !important;
+    }
+    .bottom-upload-container [data-testid="stFileUploadWrapper"] > div:hover {
+        transform: scale(1.02) !important;
+        box-shadow: 0 6px 20px rgba(30,60,114,0.4) !important;
+    }
+    .bottom-upload-container [data-testid="stFileUploadWrapper"] label {
+        color: white !important;
+        font-size: 1.1rem !important;
+        font-weight: 600 !important;
+        cursor: pointer !important;
+    }
+    .bottom-upload-container [data-testid="stUploadedFile"] {
+        display: none !important;
+    }
+    </style>
+    
+    <div class="bottom-upload-container">
+    """, unsafe_allow_html=True)
+    
+    bottom_uploaded = st.file_uploader(
+        "📤 继续上传图片",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        key=f"bottom_file_uploader_v{st.session_state.uploader_key_version}",
+        label_visibility="collapsed"
+    )
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    if bottom_uploaded:
+        st.session_state.bottom_new_files = bottom_uploaded
+        st.rerun()
+
+# ==================== 页脚 ====================
 st.markdown(
     """
     <div style="text-align: center; margin-top: 3rem; padding: 1rem; color: #9ca3af; font-size: 0.7rem;">
-        Powered by YOLOv26 · Streamlit · 工业质检解决方案
+        Powered by YOLOv26 · Streamlit · MES团队 · 支持手机拍照
     </div>
     """,
     unsafe_allow_html=True
