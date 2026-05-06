@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from utils.model_loader import Detector
 
 # MES 配置
-MES_URL = "http://8.156.84.27:9090"
+MES_URL = "http://8.156.84.27:9091"
 MES_USERNAME = "admin"
 MES_PASSWORD = "admin123"
 
