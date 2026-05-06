@@ -1,3 +1,4 @@
+# HALporject-4.0 - AI视觉检测系统 (v4.0 - 2026-05-07)
 import streamlit as st
 from PIL import Image, ImageEnhance, ImageFilter
 import numpy as np
