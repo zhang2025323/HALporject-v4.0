@@ -846,18 +846,7 @@ uploaded_files = None
 with st.sidebar:
     st.markdown("### 🔗 MES 集成")
     mes_url_input = st.text_input("MES 服务器地址", value=MES_URL)
-    product_id = st.text_input("⚠️ 产品 ID（必填）", placeholder="如：P001", help="请输入产品ID，用于关联MES系统中的产品信息")
-    if not product_id:
-        st.warning("⚠️ 请输入产品ID，否则数据无法正确关联")
-    
-    st.markdown("---")
-    st.markdown("### 🤖 自动上传")
-    auto_upload = st.checkbox("🔄 检测后自动发送到MES", value=st.session_state.auto_upload_enabled,
-                              help="开启后，每张图片检测完成会自动将结果发送到MES，无需手动点击")
-    st.session_state.auto_upload_enabled = auto_upload
-    if auto_upload and not product_id:
-        st.warning("⚠️ 开启自动上传但未填写产品ID，自动上传将失败")
-    
+    product_id = st.text_input("产品 ID（可选）", placeholder="留空则由MES自动生成", help="可留空，系统会自动生成唯一标识")
     st.info("💡 通过 frp 内网穿透访问本地 MES")
     st.markdown("---")
     
