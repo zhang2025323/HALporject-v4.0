@@ -433,6 +433,11 @@ if "just_cleared" not in st.session_state:
 # 新增：上传器版本号（用于强制重置文件列表）
 if "uploader_key_version" not in st.session_state:
     st.session_state.uploader_key_version = 0
+# 新增：自动上传相关状态
+if "auto_upload_enabled" not in st.session_state:
+    st.session_state.auto_upload_enabled = True
+if "auto_uploaded_files" not in st.session_state:
+    st.session_state.auto_uploaded_files = set()
 
 # ==================== 移动端优化的CSS ====================
 mobile_optimized_css = """
@@ -844,6 +849,15 @@ with st.sidebar:
     product_id = st.text_input("⚠️ 产品 ID（必填）", placeholder="如：P001", help="请输入产品ID，用于关联MES系统中的产品信息")
     if not product_id:
         st.warning("⚠️ 请输入产品ID，否则数据无法正确关联")
+    
+    st.markdown("---")
+    st.markdown("### 🤖 自动上传")
+    auto_upload = st.checkbox("🔄 检测后自动发送到MES", value=st.session_state.auto_upload_enabled,
+                              help="开启后，每张图片检测完成会自动将结果发送到MES，无需手动点击")
+    st.session_state.auto_upload_enabled = auto_upload
+    if auto_upload and not product_id:
+        st.warning("⚠️ 开启自动上传但未填写产品ID，自动上传将失败")
+    
     st.info("💡 通过 frp 内网穿透访问本地 MES")
     st.markdown("---")
     
@@ -1217,6 +1231,25 @@ if all_uploaded_files:
             )
             st.session_state.detection_records.append(result['record'])
             print(f"   ✓ 已添加: {file_key}")
+            
+            # 🔄 自动上传：检测完成后立即发送到MES
+            if st.session_state.auto_upload_enabled and file_key not in st.session_state.auto_uploaded_files:
+                if product_id:
+                    detection_result = {
+                        "文件名": file_key,
+                        "划痕数量": result['record'].get('划痕数量', 0),
+                        "漏装螺丝数量": result['record'].get('漏装螺丝数量', 0),
+                        "检测耗时(ms)": result['record'].get('检测耗时(ms)', 0),
+                        "产品ID": product_id
+                    }
+                    send_success = mes_connector.send_detection_result(detection_result)
+                    if send_success:
+                        st.session_state.auto_uploaded_files.add(file_key)
+                        print(f"   🔄 自动上传成功: {file_key}")
+                    else:
+                        print(f"   ⚠️ 自动上传失败: {file_key} (可手动重试)")
+                else:
+                    print(f"   ⏭️ 跳过自动上传（未填写产品ID）: {file_key}")
 
     # 显示错误信息
     if errors:
@@ -1277,6 +1310,7 @@ if all_uploaded_files:
                 st.session_state.detection_cache = {}
                 st.session_state.deleted_files = set()
                 st.session_state.just_cleared = True  # 标记：刚执行了清除
+                st.session_state.auto_uploaded_files = set()  # 清除自动上传记录
 
                 # 🔑 关键：增加版本号，强制重新创建 file_uploader 组件
                 # 这样 Streamlit 会认为这是新组件，从而清除文件列表
