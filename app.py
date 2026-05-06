@@ -9,18 +9,54 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from utils.model_loader import Detector
 
 # MES 配置
 MES_URL = "http://8.156.84.27:9090"
+MES_USERNAME = "admin"
+MES_PASSWORD = "admin123"
 
 class MESConnector:
     def __init__(self):
         self.session = requests.Session()
-    
+        self.token = None
+        self.token_expiry = None
+
+    def login_and_get_token(self):
+        """登录获取Token"""
+        try:
+            if self.token and self.token_expiry and datetime.now() < self.token_expiry:
+                return self.token
+
+            print(f"🔐 正在登录 MES: {MES_URL}/api/login")
+            response = self.session.post(
+                f"{MES_URL}/api/login",
+                json={
+                    "username": MES_USERNAME,
+                    "password": MES_PASSWORD
+                },
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                self.token = data.get("token")
+                # Token 有效期设为23小时（比实际的24小时短一点）
+                self.token_expiry = datetime.now() + timedelta(hours=23)
+                print(f"✅ 登录成功，获取到Token")
+                return self.token
+            else:
+                print(f"❌ 登录失败: {response.status_code} - {response.text}")
+                return None
+
+        except Exception as e:
+            print(f"❌ 登录异常: {e}")
+            return None
+
     def send_detection_result(self, result):
         try:
+            # 先尝试不带Token调用 /aiDetect（如果Security配置生效了）
             data = {
                 "fileName": result.get("文件名"),
                 "scratchCount": result.get("划痕数量", 0),
@@ -30,8 +66,8 @@ class MESConnector:
                 "imageUrl": ""
             }
 
-            print(f"🚀 正在发送数据到 MES: {MES_URL}/mes/api/aiDetect")
-            print(f"   数据内容: {data}")
+            print(f"🚀 正在发送数据到 MES (尝试1: 无Token)")
+            print(f"   URL: {MES_URL}/mes/api/aiDetect")
 
             response = self.session.post(
                 f"{MES_URL}/mes/api/aiDetect",
@@ -40,19 +76,85 @@ class MESConnector:
             )
 
             print(f"   响应状态码: {response.status_code}")
-            print(f"   响应内容: {response.text}")
 
             if response.status_code == 200:
-                print(f"✅ 检测结果已发送到MES: {result.get('文件名')}")
+                print(f"✅ 检测结果已发送到MES (无需Token): {result.get('文件名')}")
                 return True
-            else:
-                print(f"❌ 发送失败: {response.status_code}")
-                return False
+
+            # 如果返回401或404，尝试带Token
+            if response.status_code in [401, 404]:
+                print(f"⚠️ 尝试失败，切换到带Token模式...")
+
+                token = self.login_and_get_token()
+                if not token:
+                    print(f"❌ 无法获取Token，尝试备用方案...")
+                    return self.send_via_addimage(result)
+
+                headers = {"Authorization": f"Bearer {token}"}
+                response = self.session.post(
+                    f"{MES_URL}/mes/api/aiDetect",
+                    json=data,
+                    headers=headers,
+                    timeout=10
+                )
+
+                print(f"   带Token响应状态码: {response.status_code}")
+
+                if response.status_code == 200:
+                    print(f"✅ 检测结果已发送到MES (带Token): {result.get('文件名')}")
+                    return True
+
+                # 如果还是404，使用备用方案
+                if response.status_code == 404:
+                    print(f"⚠️ 新端点不可用，使用备用方案...")
+                    return self.send_via_addimage(result)
+
+            print(f"❌ 发送失败: {response.status_code} - {response.text}")
+            return False
 
         except Exception as e:
             print(f"❌ 发送异常: {e}")
             import traceback
             print(f"   详细错误信息: {traceback.format_exc()}")
+            return False
+
+    def send_via_addimage(self, result):
+        """备用方案：通过 /addImage 发送"""
+        try:
+            import base64
+            import json
+
+            detection_data = {
+                "fileName": result.get("文件名"),
+                "scratchCount": result.get("划痕数量", 0),
+                "missingCount": result.get("漏装螺丝数量", 0),
+                "detectionTime": result.get("检测耗时(ms)", 0),
+                "productId": result.get("产品ID", "")
+            }
+
+            data = {
+                "img": "",  # 空图片
+                "address": f"AI_DETECT:{json.dumps(detection_data)}"  # 将检测数据嵌入address字段
+            }
+
+            print(f"🔄 使用备用方案: {MES_URL}/mes/api/addImage")
+            print(f"   数据嵌入address字段")
+
+            response = self.session.post(
+                f"{MES_URL}/mes/api/addImage",
+                json=data,
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                print(f"✅ 检测结果已通过备用方案发送: {result.get('文件名')}")
+                return True
+            else:
+                print(f"❌ 备用方案也失败: {response.status_code}")
+                return False
+
+        except Exception as e:
+            print(f"❌ 备用方案异常: {e}")
             return False
 
 # 全局MES连接器实例
