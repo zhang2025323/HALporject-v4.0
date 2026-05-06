@@ -110,11 +110,13 @@ class MESConnector:
                 "missingCount": result.get("漏装螺丝数量", 0),
                 "detectionTime": result.get("检测耗时(ms)", 0),
                 "productId": result.get("产品ID", ""),
-                "imageUrl": ""
+                "imageUrl": "",
+                "imageBase64": result.get("imageBase64", "")
             }
 
             print(f"🚀 正在发送数据到 MES (尝试1: 无Token)")
             print(f"   URL: {MES_URL}/mes/api/aiDetect")
+            print(f"   📷 imageBase64长度: {len(data.get('imageBase64', '')) if data.get('imageBase64') else 0}")
 
             response = self.session.post(
                 f"{MES_URL}/mes/api/aiDetect",
@@ -176,7 +178,8 @@ class MESConnector:
                 "scratchCount": result.get("划痕数量", 0),
                 "missingCount": result.get("漏装螺丝数量", 0),
                 "detectionTime": result.get("检测耗时(ms)", 0),
-                "productId": result.get("产品ID", "")
+                "productId": result.get("产品ID", ""),
+                "imageBase64": result.get("imageBase64", "")
             }
 
             data = {
