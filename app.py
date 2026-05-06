@@ -5,6 +5,7 @@ import time
 import pandas as pd
 from io import BytesIO
 import os
+import base64
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
@@ -22,6 +23,52 @@ class MESConnector:
         self.session = requests.Session()
         self.token = None
         self.token_expiry = None
+
+    @staticmethod
+    def compress_image_for_upload(image_array, max_size_kb=100, quality=90):
+        """
+        智能压缩图片到指定大小以内
+        
+        Args:
+            image_array: numpy数组 (从Streamlit获取)
+            max_size_kb: 目标最大大小(KB)，默认100KB
+            quality: JPEG质量(1-100)，默认90（高质量）
+        
+        Returns:
+            str: Base64编码的图片字符串
+        """
+        try:
+            pil_image = Image.fromarray(image_array)
+            
+            if pil_image.mode in ('RGBA', 'P'):
+                pil_image = pil_image.convert('RGB')
+            
+            buffer = BytesIO()
+            pil_image.save(buffer, format='JPEG', quality=quality)
+            size_kb = len(buffer.getvalue()) / 1024
+            
+            if size_kb <= max_size_kb:
+                print(f"   📷 图片大小: {size_kb:.1f} KB (无需压缩)")
+                return base64.b64encode(buffer.getvalue()).decode()
+            
+            for q in range(quality, 50, -5):
+                buffer = BytesIO()
+                pil_image.save(buffer, format='JPEG', quality=q)
+                size_kb = len(buffer.getvalue()) / 1024
+                
+                if size_kb <= max_size_kb:
+                    print(f"   📷 图片压缩: → {size_kb:.1f} KB (质量={q})")
+                    return base64.b64encode(buffer.getvalue()).decode()
+            
+            buffer = BytesIO()
+            pil_image.save(buffer, format='JPEG', quality=50)
+            size_kb = len(buffer.getvalue()) / 1024
+            print(f"   📷 图片压缩完成: {size_kb:.1f} KB (质量=50)")
+            return base64.b64encode(buffer.getvalue()).decode()
+            
+        except Exception as e:
+            print(f"   ⚠️ 图片压缩失败: {e}")
+            return ""
 
     def login_and_get_token(self):
         """登录获取Token"""
@@ -1223,12 +1270,19 @@ if all_uploaded_files:
             
             # 🔄 自动上传：检测完成后立即发送到MES
             if st.session_state.auto_upload_enabled and file_key not in st.session_state.auto_uploaded_files:
+                # 压缩图片（目标100KB）
+                image_base64 = ""
+                if file_key in st.session_state.detection_cache:
+                    _, _, _, original_image = st.session_state.detection_cache[file_key]
+                    image_base64 = MESConnector.compress_image_for_upload(original_image, max_size_kb=100)
+                
                 detection_result = {
                     "文件名": file_key,
                     "划痕数量": result['record'].get('划痕数量', 0),
                     "漏装螺丝数量": result['record'].get('漏装螺丝数量', 0),
                     "检测耗时(ms)": result['record'].get('检测耗时(ms)', 0),
-                    "产品ID": product_id or ""  # 允许为空，MES会自动生成
+                    "产品ID": product_id or "",
+                    "imageBase64": image_base64  # 压缩后的图片
                 }
                 send_success = mes_connector.send_detection_result(detection_result)
                 if send_success:
