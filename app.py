@@ -14,42 +14,12 @@ from utils.model_loader import Detector
 
 # MES 配置
 MES_URL = "http://8.156.84.27:9090"
-MES_USERNAME = "admin"
-MES_PASSWORD = "admin123"
 
 class MESConnector:
     def __init__(self):
-        self.token = None
-        self.token_expire_time = 0
         self.session = requests.Session()
     
-    def login(self):
-        try:
-            response = self.session.post(
-                f"{MES_URL}/login",
-                json={"username": MES_USERNAME, "password": MES_PASSWORD},
-                timeout=10
-            )
-            if response.status_code == 200:
-                data = response.json()
-                self.token = data.get("token")
-                self.token_expire_time = time.time() + 23 * 60 * 60
-                print("✅ MES登录成功")
-                return True
-            print(f"❌ MES登录失败: {response.status_code}")
-            return False
-        except Exception as e:
-            print(f"❌ MES登录异常: {e}")
-            return False
-    
-    def is_token_valid(self):
-        return self.token and time.time() < self.token_expire_time
-    
     def send_detection_result(self, result):
-        if not self.is_token_valid():
-            if not self.login():
-                return False
-        
         try:
             data = {
                 "fileName": result.get("文件名"),
@@ -60,13 +30,17 @@ class MESConnector:
                 "checkTime": result.get("检测时间")
             }
             
-            headers = {"Authorization": f"Bearer {self.token}"}
+            print(f"🚀 正在发送数据到 MES: {MES_URL}/mes/aiProduct/detectionResult")
+            print(f"   数据内容: {data}")
+            
             response = self.session.post(
                 f"{MES_URL}/mes/aiProduct/detectionResult",
                 json=data,
-                headers=headers,
                 timeout=10
             )
+            
+            print(f"   响应状态码: {response.status_code}")
+            print(f"   响应内容: {response.text}")
             
             if response.status_code == 200:
                 print(f"✅ 检测结果已发送到MES: {result.get('文件名')}")
@@ -77,6 +51,8 @@ class MESConnector:
                 
         except Exception as e:
             print(f"❌ 发送异常: {e}")
+            import traceback
+            print(f"   详细错误信息: {traceback.format_exc()}")
             return False
 
 # 全局MES连接器实例
