@@ -22,34 +22,33 @@ class MESConnector:
     def send_detection_result(self, result):
         try:
             data = {
-                "img": "",
-                "address": "",
                 "fileName": result.get("文件名"),
                 "scratchCount": result.get("划痕数量", 0),
                 "missingCount": result.get("漏装螺丝数量", 0),
                 "detectionTime": result.get("检测耗时(ms)", 0),
-                "productId": result.get("产品ID", "")
+                "productId": result.get("产品ID", ""),
+                "imageUrl": ""
             }
-            
-            print(f"🚀 正在发送数据到 MES: {MES_URL}/mes/api/addImage")
+
+            print(f"🚀 正在发送数据到 MES: {MES_URL}/mes/api/aiDetect")
             print(f"   数据内容: {data}")
-            
+
             response = self.session.post(
-                f"{MES_URL}/mes/api/addImage",
+                f"{MES_URL}/mes/api/aiDetect",
                 json=data,
                 timeout=10
             )
-            
+
             print(f"   响应状态码: {response.status_code}")
             print(f"   响应内容: {response.text}")
-            
+
             if response.status_code == 200:
                 print(f"✅ 检测结果已发送到MES: {result.get('文件名')}")
                 return True
             else:
                 print(f"❌ 发送失败: {response.status_code}")
                 return False
-                
+
         except Exception as e:
             print(f"❌ 发送异常: {e}")
             import traceback
