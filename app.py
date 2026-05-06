@@ -841,7 +841,9 @@ uploaded_files = None
 with st.sidebar:
     st.markdown("### 🔗 MES 集成")
     mes_url_input = st.text_input("MES 服务器地址", value=MES_URL)
-    product_id = st.text_input("产品 ID（可选）", placeholder="如：P001")
+    product_id = st.text_input("⚠️ 产品 ID（必填）", placeholder="如：P001", help="请输入产品ID，用于关联MES系统中的产品信息")
+    if not product_id:
+        st.warning("⚠️ 请输入产品ID，否则数据无法正确关联")
     st.info("💡 通过 frp 内网穿透访问本地 MES")
     st.markdown("---")
     
@@ -887,6 +889,56 @@ with st.sidebar:
                     file_name=f"report_{time.strftime('%Y%m%d_%H%M%S')}.pdf",
                     mime="application/pdf"
                 )
+    
+    # 批量发送所有检测结果到MES
+    st.markdown("---")
+    st.markdown("### 🚀 批量操作")
+    col_batch1, col_batch2 = st.columns(2)
+    with col_batch1:
+        if st.button("📤 一键发送所有结果到MES", type="primary", help="将所有检测结果批量发送到MES系统"):
+            if not product_id:
+                st.error("❌ 请先在左侧边栏输入产品ID！")
+            elif len(st.session_state.detection_records) == 0:
+                st.warning("暂无检测记录，请先上传图片进行检测。")
+            else:
+                success_count = 0
+                fail_count = 0
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                total = len(st.session_state.detection_records)
+                for i, record in enumerate(st.session_state.detection_records):
+                    status_text.text(f"正在发送: {record.get('文件名', f'第{i+1}张')} ({i+1}/{total})")
+                    
+                    detection_result = {
+                        "文件名": record.get("文件名", f"image_{i+1}.jpg"),
+                        "划痕数量": record.get("划痕数量", 0),
+                        "漏装螺丝数量": record.get("漏装螺丝数量", 0),
+                        "检测耗时(ms)": record.get("检测耗时(ms)", 0),
+                        "产品ID": product_id
+                    }
+                    
+                    if mes_connector.send_detection_result(detection_result):
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                    
+                    progress_bar.progress((i + 1) / total)
+                
+                status_text.text(f"✅ 发送完成！成功: {success_count}, 失败: {fail_count}")
+                if fail_count == 0:
+                    st.success(f"🎉 全部 {success_count} 条检测结果已成功发送到MES！")
+                else:
+                    st.warning(f"⚠️ 发送完成：成功 {success_count} 条，失败 {fail_count} 条")
+    
+    with col_batch2:
+        if st.button("🗑️ 清空所有检测记录"):
+            if len(st.session_state.detection_records) == 0:
+                st.info("暂无检测记录")
+            else:
+                count = len(st.session_state.detection_records)
+                st.session_state.detection_records = []
+                st.success(f"已清空 {count} 条检测记录")
 
 # ==================== 标题行 ====================
 col1, col2, col3 = st.columns([1, 2, 1])
