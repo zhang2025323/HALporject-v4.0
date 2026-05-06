@@ -39,7 +39,10 @@ class MESConnector:
             str: Base64编码的图片字符串
         """
         try:
-            pil_image = Image.fromarray(image_array)
+            if isinstance(image_array, Image.Image):
+                pil_image = image_array
+            else:
+                pil_image = Image.fromarray(image_array)
             
             if pil_image.mode in ('RGBA', 'P'):
                 pil_image = pil_image.convert('RGB')
