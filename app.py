@@ -8,7 +8,79 @@ import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
+import requests
+from datetime import datetime
 from utils.model_loader import Detector
+
+# MES 配置
+MES_URL = "http://8.156.84.27:9090"
+MES_USERNAME = "admin"
+MES_PASSWORD = "admin123"
+
+class MESConnector:
+    def __init__(self):
+        self.token = None
+        self.token_expire_time = 0
+        self.session = requests.Session()
+    
+    def login(self):
+        try:
+            response = self.session.post(
+                f"{MES_URL}/login",
+                json={"username": MES_USERNAME, "password": MES_PASSWORD},
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                self.token = data.get("token")
+                self.token_expire_time = time.time() + 23 * 60 * 60
+                print("✅ MES登录成功")
+                return True
+            print(f"❌ MES登录失败: {response.status_code}")
+            return False
+        except Exception as e:
+            print(f"❌ MES登录异常: {e}")
+            return False
+    
+    def is_token_valid(self):
+        return self.token and time.time() < self.token_expire_time
+    
+    def send_detection_result(self, result):
+        if not self.is_token_valid():
+            if not self.login():
+                return False
+        
+        try:
+            data = {
+                "fileName": result.get("文件名"),
+                "scratchCount": result.get("划痕数量", 0),
+                "missingCount": result.get("漏装螺丝数量", 0),
+                "detectionTime": result.get("检测耗时(ms)"),
+                "productId": result.get("产品ID", ""),
+                "checkTime": result.get("检测时间")
+            }
+            
+            headers = {"Authorization": f"Bearer {self.token}"}
+            response = self.session.post(
+                f"{MES_URL}/mes/aiProduct/detectionResult",
+                json=data,
+                headers=headers,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                print(f"✅ 检测结果已发送到MES: {result.get('文件名')}")
+                return True
+            else:
+                print(f"❌ 发送失败: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ 发送异常: {e}")
+            return False
+
+# 全局MES连接器实例
+mes_connector = MESConnector()
 
 # 获取项目根目录
 BASE_DIR = Path(__file__).parent
@@ -689,6 +761,12 @@ uploaded_files = None
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
+    st.markdown("### 🔗 MES 集成")
+    mes_url_input = st.text_input("MES 服务器地址", value=MES_URL)
+    product_id = st.text_input("产品 ID（可选）", placeholder="如：P001")
+    st.info("💡 通过 frp 内网穿透访问本地 MES")
+    st.markdown("---")
+    
     st.markdown("### ⚙️ 检测参数")
     scratch_conf = st.slider("📈 划痕置信度", 0.0, 1.0, 0.5, 0.01)
     missing_conf = st.slider("📉 漏装置信度", 0.0, 1.0, 0.5, 0.01)
@@ -1113,6 +1191,26 @@ if all_uploaded_files:
                     st.markdown(f'<div class="metric-card"><div class="metric-value">{info["scratch_count"]}</div><div class="metric-label">划痕数量</div></div>', unsafe_allow_html=True)
                 with col_met2:
                     st.markdown(f'<div class="metric-card"><div class="metric-value">{info["missing_count"]}</div><div class="metric-label">漏装螺丝</div></div>', unsafe_allow_html=True)
+
+                # 添加发送到MES按钮
+                col_btn1, col_btn2 = st.columns([4, 1])
+                with col_btn2:
+                    if st.button(f"📤 发送到MES", key=f"send_{file_key}"):
+                        # 构建检测结果数据
+                        detection_result = {
+                            "文件名": file_key,
+                            "划痕数量": info["scratch_count"],
+                            "漏装螺丝数量": info["missing_count"],
+                            "检测耗时(ms)": round(inference_time * 1000, 1),
+                            "检测时间": datetime.now().isoformat(),
+                            "产品ID": product_id
+                        }
+                        
+                        # 发送到MES
+                        if mes_connector.send_detection_result(detection_result):
+                            st.success(f"✅ 已发送到MES: {file_key}")
+                        else:
+                            st.error(f"❌ 发送失败: {file_key}")
 
                 st.markdown('</div>', unsafe_allow_html=True)
                 st.markdown("---")
