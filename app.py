@@ -22,12 +22,13 @@ class MESConnector:
     def send_detection_result(self, result):
         try:
             data = {
+                "img": "",
+                "address": "",
                 "fileName": result.get("文件名"),
                 "scratchCount": result.get("划痕数量", 0),
                 "missingCount": result.get("漏装螺丝数量", 0),
-                "detectionTime": result.get("检测耗时(ms)"),
-                "productId": result.get("产品ID", ""),
-                "checkTime": result.get("检测时间")
+                "detectionTime": result.get("检测耗时(ms)", 0),
+                "productId": result.get("产品ID", "")
             }
             
             print(f"🚀 正在发送数据到 MES: {MES_URL}/mes/api/addImage")
