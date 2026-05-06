@@ -30,11 +30,11 @@ class MESConnector:
                 "checkTime": result.get("检测时间")
             }
             
-            print(f"🚀 正在发送数据到 MES: {MES_URL}/mes/aiProduct/detectionResult")
+            print(f"🚀 正在发送数据到 MES: {MES_URL}/mes/api/aiDetectionResult")
             print(f"   数据内容: {data}")
             
             response = self.session.post(
-                f"{MES_URL}/mes/aiProduct/detectionResult",
+                f"{MES_URL}/mes/api/aiDetectionResult",
                 json=data,
                 timeout=10
             )
