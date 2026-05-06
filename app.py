@@ -1275,9 +1275,14 @@ if all_uploaded_files:
             if st.session_state.auto_upload_enabled and file_key not in st.session_state.auto_uploaded_files:
                 # 压缩图片（目标100KB）
                 image_base64 = ""
+                print(f"   📷 检查缓存: file_key='{file_key}', 在缓存中={file_key in st.session_state.detection_cache}")
                 if file_key in st.session_state.detection_cache:
                     _, _, _, original_image = st.session_state.detection_cache[file_key]
+                    print(f"   📷 原始图片类型: {type(original_image)}, shape: {getattr(original_image, 'shape', 'N/A')}")
                     image_base64 = MESConnector.compress_image_for_upload(original_image, max_size_kb=100)
+                    print(f"   📷 压缩结果长度: {len(image_base64) if image_base64 else 0}")
+                else:
+                    print(f"   ⚠️ 文件不在detection_cache中，无法获取原始图片！")
                 
                 detection_result = {
                     "文件名": file_key,
