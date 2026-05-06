@@ -1223,22 +1223,19 @@ if all_uploaded_files:
             
             # 🔄 自动上传：检测完成后立即发送到MES
             if st.session_state.auto_upload_enabled and file_key not in st.session_state.auto_uploaded_files:
-                if product_id:
-                    detection_result = {
-                        "文件名": file_key,
-                        "划痕数量": result['record'].get('划痕数量', 0),
-                        "漏装螺丝数量": result['record'].get('漏装螺丝数量', 0),
-                        "检测耗时(ms)": result['record'].get('检测耗时(ms)', 0),
-                        "产品ID": product_id
-                    }
-                    send_success = mes_connector.send_detection_result(detection_result)
-                    if send_success:
-                        st.session_state.auto_uploaded_files.add(file_key)
-                        print(f"   🔄 自动上传成功: {file_key}")
-                    else:
-                        print(f"   ⚠️ 自动上传失败: {file_key} (可手动重试)")
+                detection_result = {
+                    "文件名": file_key,
+                    "划痕数量": result['record'].get('划痕数量', 0),
+                    "漏装螺丝数量": result['record'].get('漏装螺丝数量', 0),
+                    "检测耗时(ms)": result['record'].get('检测耗时(ms)', 0),
+                    "产品ID": product_id or ""  # 允许为空，MES会自动生成
+                }
+                send_success = mes_connector.send_detection_result(detection_result)
+                if send_success:
+                    st.session_state.auto_uploaded_files.add(file_key)
+                    print(f"   🔄 自动上传成功: {file_key}")
                 else:
-                    print(f"   ⏭️ 跳过自动上传（未填写产品ID）: {file_key}")
+                    print(f"   ⚠️ 自动上传失败: {file_key} (可手动重试)")
 
     # 显示错误信息
     if errors:
