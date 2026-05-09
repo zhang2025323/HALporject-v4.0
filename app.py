@@ -436,6 +436,7 @@ class BatchProcessor:
                     'file_key': file_key,
                     'image': image.copy(),  # 处理后的图片
                     'combined_img': combined_img,
+                    'annotated_image': combined_img,  # 带标注的检测结果图片
                     'info': info,
                     'inference_time': inference_time,
                     'record': {
@@ -1236,27 +1237,26 @@ if all_uploaded_files:
             
             # 🔄 自动上传：检测完成后立即发送到MES
             if st.session_state.auto_upload_enabled and file_key not in st.session_state.auto_uploaded_files:
-                # 压缩图片（目标100KB）
+                # 压缩原始工件图片
                 image_base64 = ""
                 print(f"   📷 检查缓存: file_key='{file_key}', 在缓存中={file_key in st.session_state.detection_cache}")
                 if file_key in st.session_state.detection_cache:
                     _, _, _, original_image = st.session_state.detection_cache[file_key]
                     print(f"   📷 原始图片类型: {type(original_image)}, shape: {getattr(original_image, 'shape', 'N/A')}")
                     image_base64 = MESConnector.compress_image_for_upload(original_image, max_size_kb=100)
-                    print(f"   📷 压缩结果长度: {len(image_base64) if image_base64 else 0}")
+                    print(f"   📷 原始图片压缩结果长度: {len(image_base64) if image_base64 else 0}")
                 else:
                     print(f"   ⚠️ 文件不在detection_cache中，无法获取原始图片！")
                 
-                # 压缩原始工件图片
-                image_base64 = ""
-                if file_key in st.session_state.detection_cache:
-                    _, _, _, original_image = st.session_state.detection_cache[file_key]
-                    image_base64 = MESConnector.compress_image_for_upload(original_image, max_size_kb=100)
-                
                 # 压缩检测结果图片（带标注框）
                 detection_image_base64 = ""
+                print(f"   📷 result中是否有annotated_image: {'annotated_image' in result}")
                 if 'annotated_image' in result and result['annotated_image'] is not None:
+                    print(f"   📷 annotated_image类型: {type(result['annotated_image'])}")
                     detection_image_base64 = MESConnector.compress_image_for_upload(result['annotated_image'], max_size_kb=100)
+                    print(f"   📷 检测结果图片压缩结果长度: {len(detection_image_base64) if detection_image_base64 else 0}")
+                else:
+                    print(f"   ⚠️ result中没有annotated_image或为None！")
                 
                 detection_result = {
                     "文件名": file_key,
