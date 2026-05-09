@@ -113,14 +113,15 @@ class MESConnector:
                 "scratchCount": result.get("划痕数量", 0),
                 "missingCount": result.get("漏装螺丝数量", 0),
                 "detectionTime": result.get("检测耗时(ms)", 0),
-                "productId": result.get("产品ID", ""),
                 "imageUrl": "",
-                "imageBase64": result.get("imageBase64", "")
+                "imageBase64": result.get("imageBase64", ""),
+                "detectionImageBase64": result.get("detectionImageBase64", "")
             }
 
             print(f"🚀 正在发送数据到 MES (尝试1: 无Token)")
             print(f"   URL: {MES_URL}/mes/api/aiDetect")
             print(f"   📷 imageBase64长度: {len(data.get('imageBase64', '')) if data.get('imageBase64') else 0}")
+            print(f"   📷 detectionImageBase64长度: {len(data.get('detectionImageBase64', '')) if data.get('detectionImageBase64') else 0}")
 
             response = self.session.post(
                 f"{MES_URL}/mes/api/aiDetect",
@@ -182,8 +183,8 @@ class MESConnector:
                 "scratchCount": result.get("划痕数量", 0),
                 "missingCount": result.get("漏装螺丝数量", 0),
                 "detectionTime": result.get("检测耗时(ms)", 0),
-                "productId": result.get("产品ID", ""),
-                "imageBase64": result.get("imageBase64", "")
+                "imageBase64": result.get("imageBase64", ""),
+                "detectionImageBase64": result.get("detectionImageBase64", "")
             }
 
             data = {
@@ -900,7 +901,6 @@ uploaded_files = None
 with st.sidebar:
     st.markdown("### 🔗 MES 集成")
     mes_url_input = st.text_input("MES 服务器地址", value=MES_URL)
-    product_id = st.text_input("产品 ID（可选）", placeholder="留空则由MES自动生成", help="可留空，系统会自动生成唯一标识")
     st.info("💡 通过 frp 内网穿透访问本地 MES")
     st.markdown("---")
     
@@ -946,47 +946,6 @@ with st.sidebar:
                     file_name=f"report_{time.strftime('%Y%m%d_%H%M%S')}.pdf",
                     mime="application/pdf"
                 )
-    
-    # 批量发送所有检测结果到MES
-    st.markdown("---")
-    st.markdown("### 🚀 批量操作")
-    col_batch1, col_batch2 = st.columns(2)
-    with col_batch1:
-        if st.button("📤 一键发送所有结果到MES", type="primary", help="将所有检测结果批量发送到MES系统"):
-            if not product_id:
-                st.error("❌ 请先在左侧边栏输入产品ID！")
-            elif len(st.session_state.detection_records) == 0:
-                st.warning("暂无检测记录，请先上传图片进行检测。")
-            else:
-                success_count = 0
-                fail_count = 0
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                total = len(st.session_state.detection_records)
-                for i, record in enumerate(st.session_state.detection_records):
-                    status_text.text(f"正在发送: {record.get('文件名', f'第{i+1}张')} ({i+1}/{total})")
-                    
-                    detection_result = {
-                        "文件名": record.get("文件名", f"image_{i+1}.jpg"),
-                        "划痕数量": record.get("划痕数量", 0),
-                        "漏装螺丝数量": record.get("漏装螺丝数量", 0),
-                        "检测耗时(ms)": record.get("检测耗时(ms)", 0),
-                        "产品ID": product_id
-                    }
-                    
-                    if mes_connector.send_detection_result(detection_result):
-                        success_count += 1
-                    else:
-                        fail_count += 1
-                    
-                    progress_bar.progress((i + 1) / total)
-                
-                status_text.text(f"✅ 发送完成！成功: {success_count}, 失败: {fail_count}")
-                if fail_count == 0:
-                    st.success(f"🎉 全部 {success_count} 条检测结果已成功发送到MES！")
-                else:
-                    st.warning(f"⚠️ 发送完成：成功 {success_count} 条，失败 {fail_count} 条")
     
     with col_batch2:
         if st.button("🗑️ 清空所有检测记录"):
@@ -1288,13 +1247,24 @@ if all_uploaded_files:
                 else:
                     print(f"   ⚠️ 文件不在detection_cache中，无法获取原始图片！")
                 
+                # 压缩原始工件图片
+                image_base64 = ""
+                if file_key in st.session_state.detection_cache:
+                    _, _, _, original_image = st.session_state.detection_cache[file_key]
+                    image_base64 = MESConnector.compress_image_for_upload(original_image, max_size_kb=100)
+                
+                # 压缩检测结果图片（带标注框）
+                detection_image_base64 = ""
+                if 'annotated_image' in result and result['annotated_image'] is not None:
+                    detection_image_base64 = MESConnector.compress_image_for_upload(result['annotated_image'], max_size_kb=100)
+                
                 detection_result = {
                     "文件名": file_key,
                     "划痕数量": result['record'].get('划痕数量', 0),
                     "漏装螺丝数量": result['record'].get('漏装螺丝数量', 0),
                     "检测耗时(ms)": result['record'].get('检测耗时(ms)', 0),
-                    "产品ID": product_id or "",
-                    "imageBase64": image_base64  # 压缩后的图片
+                    "imageBase64": image_base64,  # 原始工件图片
+                    "detectionImageBase64": detection_image_base64  # 检测结果图片（带标注框）
                 }
                 send_success = mes_connector.send_detection_result(detection_result)
                 if send_success:
@@ -1407,26 +1377,6 @@ if all_uploaded_files:
                     st.markdown(f'<div class="metric-card"><div class="metric-value">{info["scratch_count"]}</div><div class="metric-label">划痕数量</div></div>', unsafe_allow_html=True)
                 with col_met2:
                     st.markdown(f'<div class="metric-card"><div class="metric-value">{info["missing_count"]}</div><div class="metric-label">漏装螺丝</div></div>', unsafe_allow_html=True)
-
-                # 添加发送到MES按钮
-                col_btn1, col_btn2 = st.columns([4, 1])
-                with col_btn2:
-                    if st.button(f"📤 发送到MES", key=f"send_{file_key}"):
-                        # 构建检测结果数据
-                        detection_result = {
-                            "文件名": file_key,
-                            "划痕数量": info["scratch_count"],
-                            "漏装螺丝数量": info["missing_count"],
-                            "检测耗时(ms)": round(inference_time * 1000, 1),
-                            "检测时间": datetime.now().isoformat(),
-                            "产品ID": product_id
-                        }
-                        
-                        # 发送到MES
-                        if mes_connector.send_detection_result(detection_result):
-                            st.success(f"✅ 已发送到MES: {file_key}")
-                        else:
-                            st.error(f"❌ 发送失败: {file_key}")
 
                 st.markdown('</div>', unsafe_allow_html=True)
                 st.markdown("---")
