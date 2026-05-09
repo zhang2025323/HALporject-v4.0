@@ -919,7 +919,7 @@ with st.sidebar:
     
     st.write(f"📊 当前检测记录数：{len(st.session_state.detection_records)}")
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("📊 导出 Excel 报告"):
             if len(st.session_state.detection_records) == 0:
@@ -947,8 +947,7 @@ with st.sidebar:
                     file_name=f"report_{time.strftime('%Y%m%d_%H%M%S')}.pdf",
                     mime="application/pdf"
                 )
-    
-    with col_batch2:
+    with col3:
         if st.button("🗑️ 清空所有检测记录"):
             if len(st.session_state.detection_records) == 0:
                 st.info("暂无检测记录")
