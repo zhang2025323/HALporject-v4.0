@@ -949,12 +949,15 @@ with st.sidebar:
                 )
     with col3:
         if st.button("🗑️ 清空所有检测记录"):
-            if len(st.session_state.detection_records) == 0:
+            if len(st.session_state.detection_records) == 0 and len(st.session_state.detection_cache) == 0:
                 st.info("暂无检测记录")
             else:
-                count = len(st.session_state.detection_records)
+                count_records = len(st.session_state.detection_records)
+                count_cache = len(st.session_state.detection_cache)
                 st.session_state.detection_records = []
-                st.success(f"已清空 {count} 条检测记录")
+                st.session_state.detection_cache = {}
+                st.session_state.auto_uploaded_files = set()
+                st.success(f"已清空 {count_records} 条检测记录和 {count_cache} 张图片")
 
 # ==================== 标题行 ====================
 col1, col2, col3 = st.columns([1, 2, 1])
