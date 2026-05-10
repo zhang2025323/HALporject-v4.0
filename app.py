@@ -976,10 +976,28 @@ with st.sidebar:
             else:
                 count_records = len(st.session_state.detection_records)
                 count_cache = len(st.session_state.detection_cache)
+                
+                # 清除所有检测数据
                 st.session_state.detection_records = []
                 st.session_state.detection_cache = {}
                 st.session_state.auto_uploaded_files = set()
+                st.session_state.deleted_files = set()
+                st.session_state.just_cleared = True
+                
+                # 🔑 关键：增加版本号，强制重新创建 file_uploader 组件
+                # 这样 Streamlit 会认为这是新组件，从而清除文件列表
+                st.session_state.uploader_key_version += 1
+                
+                # 清除其他相关状态
+                if "bottom_new_files" in st.session_state:
+                    del st.session_state.bottom_new_files
+                if "pending_uploads" in st.session_state:
+                    del st.session_state.pending_uploads
+                if "all_uploaded_files_persistent" in st.session_state:
+                    st.session_state.all_uploaded_files_persistent = []
+                
                 st.success(f"已清空 {count_records} 条检测记录和 {count_cache} 张图片")
+                st.rerun()  # 强制刷新页面以立即生效
 
 # ==================== 标题行 ====================
 col1, col2, col3 = st.columns([1, 2, 1])
@@ -1398,10 +1416,10 @@ if all_uploaded_files:
                 col_img1, col_img2 = st.columns(2, gap="medium")
                 with col_img1:
                     st.markdown("**原始工件**")
-                    st.image(image, use_container_width=True, output_format="PNG")
+                    st.image(image, width='stretch', output_format="PNG")
                 with col_img2:
                     st.markdown("**检测结果**")
-                    st.image(combined_img, use_container_width=True, output_format="PNG", clamp=True, channels="RGB")
+                    st.image(combined_img, width='stretch', output_format="PNG", clamp=True, channels="RGB")
 
                 col_met1, col_met2 = st.columns(2)
                 with col_met1:
