@@ -431,12 +431,32 @@ class BatchProcessor:
                 combined_img, info = self.detector.detect_both(image)
                 inference_time = time.time() - start_time
                 
-                # 记录结果
+                # 🎯 内存优化：压缩图片以减少内存占用（关键！）
+                import io
+                buffer = io.BytesIO()
+                
+                # 压缩原始图片（quality=85, 优化存储）
+                image.save(buffer, format='JPEG', quality=85, optimize=True)
+                compressed_image_bytes = buffer.getvalue()
+                compressed_image = Image.open(io.BytesIO(compressed_image_bytes))
+                
+                # 压缩检测结果图片
+                buffer2 = io.BytesIO()
+                if isinstance(combined_img, np.ndarray):
+                    from PIL import Image as PILImage
+                    combined_img_pil = PILImage.fromarray(combined_img)
+                    combined_img_pil.save(buffer2, format='JPEG', quality=85, optimize=True)
+                else:
+                    combined_img.save(buffer2, format='JPEG', quality=85, optimize=True)
+                compressed_combined_bytes = buffer2.getvalue()
+                compressed_combined = Image.open(io.BytesIO(compressed_combined_bytes))
+                
+                # 记录结果（使用压缩后的图片）
                 result = {
                     'file_key': file_key,
-                    'image': image.copy(),  # 处理后的图片
-                    'combined_img': combined_img,
-                    'annotated_image': combined_img,  # 带标注的检测结果图片
+                    'image': compressed_image,  # 压缩后的原始图片
+                    'combined_img': compressed_combined,
+                    'annotated_image': compressed_combined,  # 带标注的检测结果图片（已压缩）
                     'info': info,
                     'inference_time': inference_time,
                     'record': {
@@ -449,8 +469,10 @@ class BatchProcessor:
                 }
                 results.append(result)
 
-                # 及时释放内存
-                del image, combined_img
+                # 及时释放内存（重要！）
+                del image, combined_img, buffer, buffer2
+                import gc
+                gc.collect()  # 强制垃圾回收
                 
             except Exception as e:
                 error_info = {
@@ -907,7 +929,7 @@ with st.sidebar:
     
     st.markdown("### ⚙️ 检测参数")
     scratch_conf = st.slider("📈 划痕置信度", 0.0, 1.0, 0.5, 0.01)
-    missing_conf = st.slider("📉 漏装置信度", 0.0, 1.0, 0.5, 0.01)
+    missing_conf = st.slider("📉 漏装置信度", 0.0, 1.0, 0.3, 0.01)  # 降低默认值以提高检测率
     st.info("💡 提示：建议阈值范围 0.3-0.7。太低会误检，太高会漏检")
     st.markdown("---")
     
@@ -1224,10 +1246,17 @@ if all_uploaded_files:
     )
     print(f"✅ 检测完成: 成功 {len(results)} 张, 失败 {len(errors)} 张")
 
-    # 将结果存入缓存
+    # 将结果存入缓存（限制缓存大小以防止内存溢出）
+    MAX_CACHE_SIZE = 20  # 最大缓存20张图片
     for result in results:
         file_key = result['file_key']
         if file_key not in st.session_state.detection_cache:
+            # 如果缓存已满，删除最旧的记录
+            if len(st.session_state.detection_cache) >= MAX_CACHE_SIZE:
+                oldest_key = next(iter(st.session_state.detection_cache))
+                del st.session_state.detection_cache[oldest_key]
+                print(f"   ⚠️ 缓存已满，移除最旧记录: {oldest_key}")
+            
             st.session_state.detection_cache[file_key] = (
                 result['combined_img'],
                 result['info'],
@@ -1235,7 +1264,7 @@ if all_uploaded_files:
                 result['image']
             )
             st.session_state.detection_records.append(result['record'])
-            print(f"   ✓ 已添加: {file_key}")
+            print(f"   ✓ 已添加: {file_key} (缓存大小: {len(st.session_state.detection_cache)}/{MAX_CACHE_SIZE})")
             
             # 🔄 自动上传：检测完成后立即发送到MES
             if st.session_state.auto_upload_enabled and file_key not in st.session_state.auto_uploaded_files:
